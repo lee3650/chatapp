@@ -7,23 +7,24 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 )
 
 const LOBBY_ID_LENGTH = 6
 
 type message struct {
-	Id            int    `json:"id"`
-	LobbyId       string `json:"lobby_id"`
-	SenderName    string `json:"sender_name"`
-	MessageString string `json:"message_string"`
+	Id            int    `json:"messageId"`
+	LobbyId       string `json:"lobbyId"`
+	SenderName    string `json:"senderName"`
+	MessageString string `json:"messageContent"`
 	Timestamp     int64  `json:"timestamp"`
 }
 
 type sender struct {
-	Username string `json:"username"`
-	LobbyId  string `json:"lobby_id"`
-	IsTyping bool   `json:"is_typing"`
+	Username string `json:"name"`
+	LobbyId  string `json:"lobbyId"`
+	IsTyping bool   `json:"isTyping"`
 }
 
 type lobbyData struct {
@@ -34,6 +35,8 @@ type lobbyData struct {
 
 func main() {
 	router := gin.Default()
+
+	router.Use(cors.Default())
 
 	router.GET("/lobby/:id", fetchLobbyData)
 	router.POST("/postMessage", postMessage)
@@ -112,10 +115,9 @@ func postMessage(c *gin.Context) {
 	msg.Timestamp = time.Now().Unix()
 	nextMessageId++
 	messages = append(messages, msg)
+	defer msgMutex.Unlock()
 
 	lobbyData, err := constructLobbyData(msg.LobbyId)
-
-	defer msgMutex.Unlock()
 
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"message": err.Error()})
@@ -219,6 +221,7 @@ func updateTyping(c *gin.Context) {
 			found = true
 			break
 		}
+		i++
 	}
 
 	defer senderMutex.Unlock()
