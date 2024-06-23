@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sync"
 	"time"
+	"log"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -34,6 +35,8 @@ type lobbyData struct {
 }
 
 func main() {
+	// gin.SetMode(gin.ReleaseMode);
+
 	router := gin.Default()
 
 	router.Use(cors.Default())
@@ -45,7 +48,11 @@ func main() {
 	router.POST("/enterLobby", enterLobby)
 	router.POST("/updateTyping", updateTyping)
 
-	router.Run("localhost:8080")
+	err := router.RunTLS(":8443", "/etc/letsencrypt/live/daily-planners.com/fullchain.pem", "/etc/letsencrypt/live/daily-planners.com/privkey.pem")
+
+	if err != nil {
+	    log.Fatal("unable to start server :", err)
+	}
 }
 
 var messages = []message{}
@@ -215,8 +222,8 @@ func updateTyping(c *gin.Context) {
 
 	found := false
 
-	for i := 0; i < len(senders); {
-		if senders[i].Username == request.Username && senders[i].LobbyId == request.LobbyId {
+	for i, s := range senders {
+		if s.Username == request.Username && s.LobbyId == request.LobbyId {
 			senders[i].IsTyping = request.IsTyping
 			found = true
 			break
