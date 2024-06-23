@@ -1,15 +1,19 @@
 package main
 
 import (
+	"database/sql"
 	"errors"
+	"fmt"
+	"log"
 	"math/rand"
 	"net/http"
+	"os"
 	"sync"
 	"time"
-	"log"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/go-sql-driver/mysql"
 )
 
 const LOBBY_ID_LENGTH = 6
@@ -34,8 +38,30 @@ type lobbyData struct {
 	Id       string    `json:"id"`
 }
 
+var db *sql.DB
+
 func main() {
 	// gin.SetMode(gin.ReleaseMode);
+
+	cfg := mysql.Config{
+		User:   os.Getenv("DBUSER"),
+		Passwd: os.Getenv("DBPASS"),
+		Net:    "tcp",
+		Addr:   os.Getenv("DBADDR"),
+		DBName: "chat",
+	}
+
+	var dberr error
+	db, dberr = sql.Open("mysql", cfg.FormatDSN())
+	if dberr != nil {
+		log.Fatal(dberr)
+	}
+
+	pingErr := db.Ping()
+	if pingErr != nil {
+		log.Fatal(pingErr)
+	}
+	fmt.Println("Connected to database!")
 
 	router := gin.Default()
 
@@ -48,24 +74,94 @@ func main() {
 	router.POST("/enterLobby", enterLobby)
 	router.POST("/updateTyping", updateTyping)
 
-	err := router.RunTLS(":8443", "/etc/letsencrypt/live/daily-planners.com/fullchain.pem", "/etc/letsencrypt/live/daily-planners.com/privkey.pem")
+	var err error
+
+	if os.Getenv("USETLS") == "true" {
+		err = router.RunTLS(":8443", "/etc/letsencrypt/live/daily-planners.com/fullchain.pem", "/etc/letsencrypt/live/daily-planners.com/privkey.pem")
+	} else {
+		err = router.Run(":8080")
+	}
 
 	if err != nil {
-	    log.Fatal("unable to start server :", err)
+		log.Fatal("unable to start server :", err)
 	}
 }
 
-var messages = []message{}
-var senders = []sender{}
-var lobbies = map[string]bool{}
+// var messages = []message{}
+// var senders = []sender{}
+// var lobbies = map[string]bool{}
 var msgMutex sync.Mutex
-var nextMessageId = 1
+
+// var nextMessageId = 1
 var lobbyMutex sync.Mutex
 var senderMutex sync.Mutex
 
 func doesLobbyExist(id string) bool {
-	_, ok := lobbies[id]
-	return ok
+	var val int
+
+	row := db.QueryRow("SELECT COUNT(*) FROM lobbies WHERE id = ?", id)
+
+	if err := row.Scan(&val); err != nil {
+		return false
+	}
+
+	if val == 0 {
+		return false
+	}
+
+	return true
+}
+
+func getMessagesFor(lobbyId string) ([]message, error) {
+	messages := []message{}
+
+	rows, err := db.Query("SELECT * FROM message WHERE lobbyId = ?", lobbyId)
+	if err != nil {
+		return nil, err
+	}
+
+	defer rows.Close()
+
+	// Loop through rows, using Scan to assign column data to struct fields.
+	for rows.Next() {
+		var msg message
+		if err := rows.Scan(&msg.Id, &msg.LobbyId, &msg.SenderName, &msg.MessageString, &msg.Timestamp); err != nil {
+			return nil, fmt.Errorf("get messages for %q: %v", lobbyId, err)
+		}
+		messages = append(messages, msg)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("get messages for %q: %v", lobbyId, err)
+	}
+
+	return messages, nil
+}
+
+func getSendersFor(lobbyId string) ([]sender, error) {
+	senders := []sender{}
+
+	rows, err := db.Query("SELECT * FROM sender WHERE lobbyId = ?", lobbyId)
+	if err != nil {
+		return nil, err
+	}
+
+	defer rows.Close()
+
+	// Loop through rows, using Scan to assign column data to struct fields.
+	for rows.Next() {
+		var sndr sender
+		if err := rows.Scan(&sndr.Username, &sndr.LobbyId, &sndr.IsTyping); err != nil {
+			return nil, fmt.Errorf("get senders for %q: %v", lobbyId, err)
+		}
+		senders = append(senders, sndr)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("get senders for %q: %v", lobbyId, err)
+	}
+
+	return senders, nil
 }
 
 func constructLobbyData(id string) (lobbyData, error) {
@@ -73,19 +169,15 @@ func constructLobbyData(id string) (lobbyData, error) {
 		return lobbyData{}, errors.New("lobby not found")
 	}
 
-	var includedMsgs = []message{}
-	var includedSenders = []sender{}
+	includedMsgs, msgerr := getMessagesFor(id)
+	includedSenders, sendererr := getSendersFor(id)
 
-	for _, m := range messages {
-		if m.LobbyId == id {
-			includedMsgs = append(includedMsgs, m)
-		}
+	if msgerr != nil {
+		return lobbyData{}, msgerr
 	}
 
-	for _, s := range senders {
-		if s.LobbyId == id {
-			includedSenders = append(includedSenders, s)
-		}
+	if sendererr != nil {
+		return lobbyData{}, sendererr
 	}
 
 	return lobbyData{Messages: includedMsgs, Senders: includedSenders, Id: id}, nil
@@ -104,6 +196,16 @@ func fetchLobbyData(c *gin.Context) {
 	c.IndentedJSON(http.StatusOK, result)
 }
 
+func appendMessage(msg message) error {
+	msg.Timestamp = time.Now().Unix()
+
+	_, err := db.Exec("INSERT INTO message (lobbyId, senderName, messageString, timestamp) VALUES (?, ?, ?, ?)", msg.LobbyId, msg.SenderName, msg.MessageString, msg.Timestamp)
+	if err != nil {
+		return fmt.Errorf("addAlbum: %v", err)
+	}
+	return nil
+}
+
 func postMessage(c *gin.Context) {
 	var msg message
 
@@ -118,10 +220,12 @@ func postMessage(c *gin.Context) {
 	}
 
 	msgMutex.Lock()
-	msg.Id = nextMessageId
-	msg.Timestamp = time.Now().Unix()
-	nextMessageId++
-	messages = append(messages, msg)
+
+	insertErr := appendMessage(msg)
+	if insertErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"message": insertErr.Error()})
+	}
+
 	defer msgMutex.Unlock()
 
 	lobbyData, err := constructLobbyData(msg.LobbyId)
@@ -134,11 +238,20 @@ func postMessage(c *gin.Context) {
 	c.IndentedJSON(http.StatusCreated, lobbyData)
 }
 
+func insertLobby(id string) error {
+	_, err := db.Exec("INSERT INTO lobbies (id) VALUES (?)", id)
+	if err != nil {
+		return fmt.Errorf("insert lobby: %v", err)
+	}
+	return nil
+}
+
 func createLobby(c *gin.Context) {
 	lobbyMutex.Lock()
 	var id string
 	id = randSeq(LOBBY_ID_LENGTH)
 	attempts := 10
+
 	for doesLobbyExist(id) && attempts > 0 {
 		id = randSeq(LOBBY_ID_LENGTH)
 		attempts -= 1
@@ -150,12 +263,44 @@ func createLobby(c *gin.Context) {
 		return
 	}
 
-	// now we have our id
-	lobbies[id] = true
-
 	defer lobbyMutex.Unlock()
 
+	err := insertLobby(id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"message": err.Error()})
+	}
+
 	c.JSON(http.StatusCreated, id)
+}
+
+func senderExists(enterReq sender) bool {
+	var val int
+
+	row := db.QueryRow("SELECT COUNT(*) FROM sender WHERE lobbyId = ? AND name = ?", enterReq.LobbyId, enterReq.Username)
+	if err := row.Scan(&val); err != nil {
+		return false
+	}
+
+	if val == 0 {
+		return false
+	}
+
+	return true
+}
+
+func addSender(enterReq sender) error {
+	if senderExists(enterReq) {
+		return nil
+	}
+
+	enterReq.IsTyping = false
+
+	_, err := db.Exec("INSERT INTO sender (name, lobbyId, isTyping) VALUES (?, ?, ?)", enterReq.Username, enterReq.LobbyId, enterReq.IsTyping)
+	if err != nil {
+		return fmt.Errorf("insert lobby: %v", err)
+	}
+
+	return nil
 }
 
 func enterLobby(c *gin.Context) {
@@ -174,18 +319,10 @@ func enterLobby(c *gin.Context) {
 	// we really want to check if this person already exists...
 
 	senderMutex.Lock()
-
-	add := true
-
-	for _, s := range senders {
-		if s.LobbyId == enterReq.LobbyId && s.Username == enterReq.Username {
-			add = false
-		}
-	}
-
-	if add {
-		enterReq.IsTyping = false
-		senders = append(senders, enterReq)
+	addErr := addSender(enterReq)
+	if addErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"message": addErr.Error()})
+		return
 	}
 
 	defer senderMutex.Unlock()
@@ -210,6 +347,20 @@ func lobbyExists(c *gin.Context) {
 	c.IndentedJSON(http.StatusOK, true)
 }
 
+func setTyping(request sender) error {
+	/*
+		var val int
+		if request.IsTyping {
+			val = 1
+		} else {
+			val = 0
+		}
+	*/
+	fmt.Printf("updating sender: %v", request)
+	_, err := db.Exec("UPDATE sender SET isTyping = ? WHERE lobbyId = ? AND name = ?", request.IsTyping, request.LobbyId, request.Username)
+	return err
+}
+
 func updateTyping(c *gin.Context) {
 	var request sender
 
@@ -220,23 +371,14 @@ func updateTyping(c *gin.Context) {
 
 	senderMutex.Lock()
 
-	found := false
-
-	for i, s := range senders {
-		if s.Username == request.Username && s.LobbyId == request.LobbyId {
-			senders[i].IsTyping = request.IsTyping
-			found = true
-			break
-		}
-		i++
-	}
+	err := setTyping(request)
 
 	defer senderMutex.Unlock()
 
-	if found {
+	if err == nil {
 		c.JSON(http.StatusOK, struct{}{})
 	} else {
-		c.JSON(http.StatusNotFound, gin.H{"message": "Could not find sender to update!"})
+		c.JSON(http.StatusNotFound, gin.H{"message": err.Error()})
 	}
 }
 
