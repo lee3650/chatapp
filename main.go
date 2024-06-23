@@ -17,6 +17,8 @@ import (
 )
 
 const LOBBY_ID_LENGTH = 6
+const MAX_MSG_LEN = 512
+const MAX_USERNAME_LEN = 32
 
 type message struct {
 	Id            int    `json:"messageId"`
@@ -41,7 +43,7 @@ type lobbyData struct {
 var db *sql.DB
 
 func main() {
-	// gin.SetMode(gin.ReleaseMode);
+	gin.SetMode(gin.ReleaseMode);
 
 	cfg := mysql.Config{
 		User:   os.Getenv("DBUSER"),
@@ -49,6 +51,7 @@ func main() {
 		Net:    "tcp",
 		Addr:   os.Getenv("DBADDR"),
 		DBName: "chat",
+		AllowNativePasswords: true,
 	}
 
 	var dberr error
@@ -87,12 +90,8 @@ func main() {
 	}
 }
 
-// var messages = []message{}
-// var senders = []sender{}
-// var lobbies = map[string]bool{}
 var msgMutex sync.Mutex
 
-// var nextMessageId = 1
 var lobbyMutex sync.Mutex
 var senderMutex sync.Mutex
 
@@ -214,6 +213,11 @@ func postMessage(c *gin.Context) {
 		return
 	}
 
+	if len(msg.MessageString) > MAX_MSG_LEN {
+		c.JSON(http.StatusBadRequest, gin.H{"message": "Message is too long!"})
+		return
+	}
+
 	if !doesLobbyExist(msg.LobbyId) {
 		c.JSON(http.StatusBadRequest, gin.H{"message": "Message did not belong to a lobby!"})
 		return
@@ -316,7 +320,10 @@ func enterLobby(c *gin.Context) {
 		return
 	}
 
-	// we really want to check if this person already exists...
+	if len(enterReq.Username) > MAX_USERNAME_LEN {
+		c.JSON(http.StatusBadRequest, gin.H{"message": "Username is too long!"})
+		return
+	}
 
 	senderMutex.Lock()
 	addErr := addSender(enterReq)
@@ -348,14 +355,6 @@ func lobbyExists(c *gin.Context) {
 }
 
 func setTyping(request sender) error {
-	/*
-		var val int
-		if request.IsTyping {
-			val = 1
-		} else {
-			val = 0
-		}
-	*/
 	fmt.Printf("updating sender: %v", request)
 	_, err := db.Exec("UPDATE sender SET isTyping = ? WHERE lobbyId = ? AND name = ?", request.IsTyping, request.LobbyId, request.Username)
 	return err
